@@ -20,6 +20,7 @@ import {
 import { isAbsolute, join, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { TurnDumpConfig } from "./config.ts";
+import type { NormalizedDumpInput } from "./input.ts";
 
 /** One row in a session's tab-separated event index. */
 export interface IndexRow {
@@ -53,10 +54,10 @@ export interface MessageWriteResult {
   nextSequence: number;
 }
 
-/** Result of writing a raw provider request. */
-export interface RequestWriteResult {
-  chars: number;
-  filename: string;
+/** Result of writing one normalized input event. */
+export interface InputWriteResult extends MessageWriteResult {
+  paramsChars: number;
+  paramsFilename?: string;
 }
 
 const INDEX_COLUMNS = [
@@ -144,13 +145,34 @@ function renderImage(block: Record<string, unknown>): string {
 function renderContentBlock(block: unknown): string {
   const record = asRecord(block);
   if (record === undefined) return String(block ?? "");
+  if (record.type === undefined && typeof record.text === "string") return record.text;
 
   switch (record.type) {
     case "text":
+    case "input_text":
+    case "output_text":
       return typeof record.text === "string" ? record.text : "";
+    case "image":
+    case "input_image":
+    case "output_image":
+      return renderImage(record);
     case "thinking": {
-      const thinking = typeof record.thinking === "string" ? record.thinking : "";
+      const thinking =
+        typeof record.thinking === "string"
+          ? record.thinking
+          : typeof record.text === "string"
+            ? record.text
+            : "";
       return `[thinking]\n${thinking}`;
+    }
+    case "reasoning": {
+      const reasoning =
+        typeof record.summary === "string"
+          ? record.summary
+          : typeof record.text === "string"
+            ? record.text
+            : "";
+      return `[reasoning]\n${reasoning}`;
     }
     case "toolCall": {
       const name = typeof record.name === "string" ? record.name : "unknown";
@@ -158,8 +180,17 @@ function renderContentBlock(block: unknown): string {
       const args = record.arguments === undefined ? {} : record.arguments;
       return `[tool call: ${name} (${id})]\n${safeJsonStringify(args)}`;
     }
-    case "image":
-      return renderImage(record);
+    case "tool_use":
+    case "tool_call":
+    case "function_call": {
+      const name = typeof record.name === "string" ? record.name : "unknown";
+      const id = typeof record.id === "string" ? record.id : String(record.call_id ?? "unknown");
+      const args = record.arguments ?? record.input ?? {};
+      return `[tool call: ${name} (${id})]\n${safeJsonStringify(args)}`;
+    }
+    case "tool_result":
+    case "function_call_output":
+      return `[tool result]\n${renderContent(record.output ?? record.content)}`;
     default:
       return safeJsonStringify(record);
   }
@@ -172,7 +203,7 @@ export function renderContent(content: unknown): string {
     return content.map(renderContentBlock).filter((part) => part.length > 0).join("\n\n");
   }
   if (content === undefined || content === null) return "";
-  return safeJsonStringify(content);
+  return renderContentBlock(content);
 }
 
 /** Returns names from a system message tool list. */
@@ -332,25 +363,67 @@ export function createTurnDirectory(
   }
 }
 
-/** Writes message files with sequence numbers continuing from `startSequence`. */
-export function writeMessages(
+/** Writes normalized message files with sequence numbers continuing from `startSequence`. */
+function writeMessageFiles(
   turnDir: string,
-  messages: readonly AgentMessage[],
+  messages: NormalizedDumpInput["messages"],
   startSequence: number,
+  filePrefix = "",
 ): MessageWriteResult {
   mkdirSync(turnDir, { recursive: true });
   let sequence = startSequence;
   let chars = 0;
 
   for (const message of messages) {
-    const content = renderMessage(message);
-    const filename = `${String(sequence).padStart(4, "0")}-${messageRole(message)}.txt`;
-    writeFileSync(join(turnDir, filename), content, "utf8");
-    chars += content.length;
+    const filename = `${filePrefix}${String(sequence).padStart(4, "0")}-${messageRole(message)}.txt`;
+    writeFileSync(join(turnDir, filename), message.text, "utf8");
+    chars += message.text.length;
     sequence += 1;
   }
 
   return { messages: messages.length, chars, nextSequence: sequence };
+}
+
+/** Writes raw Pi work messages after rendering them into the common message-file shape. */
+export function writeMessages(
+  turnDir: string,
+  messages: readonly AgentMessage[],
+  startSequence: number,
+): MessageWriteResult {
+  return writeMessageFiles(
+    turnDir,
+    messages.map((message) => ({ role: messageRole(message), text: renderMessage(message) })),
+    startSequence,
+  );
+}
+
+/** Writes one normalized input event, optionally grouping files under a request prefix. */
+export function writeInput(
+  turnDir: string,
+  input: NormalizedDumpInput,
+  startSequence = 0,
+  filePrefix = "",
+): InputWriteResult {
+  mkdirSync(turnDir, { recursive: true });
+  const prefix = filePrefix.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const messages = writeMessageFiles(turnDir, input.messages, startSequence, prefix);
+
+  let paramsChars = 0;
+  let paramsFilename: string | undefined;
+  if (input.params !== undefined) {
+    const content = `${safeJsonStringify(input.params)}\n`;
+    paramsFilename = `${prefix}params.json`;
+    writeFileSync(join(turnDir, paramsFilename), content, "utf8");
+    paramsChars = content.length;
+  }
+
+  return {
+    messages: messages.messages,
+    chars: messages.chars + paramsChars,
+    nextSequence: messages.nextSequence,
+    paramsChars,
+    ...(paramsFilename === undefined ? {} : { paramsFilename }),
+  };
 }
 
 /** Writes the clean terminal assistant reply as the next numbered turn file. */
@@ -362,19 +435,6 @@ export function writeOutputFile(
   mkdirSync(turnDir, { recursive: true });
   writeFileSync(join(turnDir, `${String(sequence).padStart(4, "0")}-output.txt`), output, "utf8");
   return { messages: 0, chars: output.length, nextSequence: sequence + 1 };
-}
-
-/** Writes one provider-native request payload with a second-pass secret redaction. */
-export function writeRequestFile(
-  turnDir: string,
-  sequence: number,
-  payload: unknown,
-): RequestWriteResult {
-  mkdirSync(turnDir, { recursive: true });
-  const content = `${safeJsonStringify(payload)}\n`;
-  const filename = `request-${String(sequence).padStart(4, "0")}.json`;
-  writeFileSync(join(turnDir, filename), content, "utf8");
-  return { chars: content.length, filename };
 }
 
 /** Writes auxiliary JSON metadata into a turn directory. */

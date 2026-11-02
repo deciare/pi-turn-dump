@@ -17,18 +17,22 @@ import {
 import { loadTurnDumpConfig, type TurnDumpConfig } from "./src/config.ts";
 import {
   appendIndexRows,
-  countImages,
   createTurnDirectory,
   lastAssistantText,
   pruneDump,
   runSucceeded,
   type IndexRow,
   type TurnDirectory,
+  writeInput,
   writeMessages,
   writeMetadataFile,
   writeOutputFile,
-  writeRequestFile,
 } from "./src/dump.ts";
+import {
+  normalizeProviderRequest,
+  normalizeTranscriptInput,
+  type NormalizedDumpInput,
+} from "./src/input.ts";
 
 /** Mutable state for the top-level agent run currently being dumped. */
 interface ActiveTurn {
@@ -90,6 +94,33 @@ export default function turnDumpExtension(pi: ExtensionAPI): void {
   };
   let active: ActiveTurn | undefined;
   let warnedRequestUnavailable = new Set<string>();
+
+  /** Writes any normalized input event through the same row and retention path. */
+  const captureInput = (
+    state: ActiveTurn,
+    input: NormalizedDumpInput,
+    ctx: ExtensionContext,
+    options: { advanceSequence: boolean; filePrefix?: string },
+  ): void => {
+    const written = writeInput(
+      state.directory.turnDir,
+      input,
+      options.advanceSequence ? state.nextSequence : 0,
+      options.filePrefix,
+    );
+    if (options.advanceSequence) state.nextSequence = written.nextSequence;
+    state.rows.push({
+      kind: input.kind,
+      timestamp: nowIso(),
+      runId: state.runId,
+      sessionId: state.sessionId,
+      ...modelFields(ctx),
+      messages: written.messages,
+      ...(input.images === undefined ? {} : { images: input.images }),
+      chars: written.chars,
+      dir: state.directory.relativeDir,
+    });
+  };
 
   /** Finalizes a partial run during session teardown. */
   const finalize = (state: ActiveTurn, aborted: boolean, outcome?: ActiveTurn["outcome"]): void => {
@@ -184,20 +215,8 @@ export default function turnDumpExtension(pi: ExtensionAPI): void {
       const state = active;
       if (state === undefined) return;
       const messages = structuredClone(event.messages);
-      const written = writeMessages(state.directory.turnDir, messages, state.nextSequence);
-      state.nextSequence = written.nextSequence;
+      captureInput(state, normalizeTranscriptInput(messages), ctx, { advanceSequence: true });
       state.inputWritten = true;
-      state.rows.push({
-        kind: "input",
-        timestamp: nowIso(),
-        runId: state.runId,
-        sessionId: state.sessionId,
-        ...modelFields(ctx),
-        messages: written.messages,
-        images: countImages(messages),
-        chars: written.chars,
-        dir: state.directory.relativeDir,
-      });
       pruneDump(config, Date.now(), state.directory.turnDir);
     }, "write input");
   });
@@ -209,15 +228,10 @@ export default function turnDumpExtension(pi: ExtensionAPI): void {
       if (state === undefined) return;
       state.requestCount += 1;
       state.requestSeenThisRun = true;
-      const written = writeRequestFile(state.directory.turnDir, state.requestCount, event.payload);
-      state.rows.push({
-        kind: "request",
-        timestamp: nowIso(),
-        runId: state.runId,
-        sessionId: state.sessionId,
-        ...modelFields(ctx),
-        chars: written.chars,
-        dir: state.directory.relativeDir,
+      const prefix = `request-${String(state.requestCount).padStart(4, "0")}-`;
+      captureInput(state, normalizeProviderRequest(event.payload), ctx, {
+        advanceSequence: false,
+        filePrefix: prefix,
       });
       pruneDump(config, Date.now(), state.directory.turnDir);
     }, "write provider request");

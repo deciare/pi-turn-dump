@@ -53,7 +53,7 @@ these are ordinary Pi extension events.
 | Key | Type | Default | Meaning |
 |---|---|---:|---|
 | `dumpDir` | string | unset | Dump root. Unset is inert. Relative paths resolve against the config file that declares them. |
-| `source` | `"input"` or `"request"` | `"input"` | Capture the normalized model transcript, or the provider-native request payload. |
+| `source` | `"input"` or `"request"` | `"input"` | Capture the normalized model transcript, or normalize the provider request payload. |
 | `maxBytes` | non-negative integer | `67108864` | Total byte cap for retained dumps, including indexes. |
 | `maxAgeMs` | non-negative integer | `21600000` | Maximum age for turn directories and index rows. |
 
@@ -69,22 +69,30 @@ the full transcript that Pi is preparing for the model after its context hooks:
 the system prompt and tool declarations, history, the triggering user or custom
 message, and extension-injected context.
 
-The files remain Pi agent messages, not provider-specific wire JSON. Message
-text, thinking, assistant tool calls, tool results, compaction summaries, branch
-summaries, shell commands, and custom messages are rendered into their own
-numbered files.
+The source is Pi's agent-message transcript, not provider-specific wire JSON.
+Message text, thinking, assistant tool calls, tool results, compaction
+summaries, branch summaries, shell commands, and custom messages are rendered
+into their own numbered files.
 
 ### `source: "request"`
 
-Captures every `before_provider_request` payload in the run as JSON. This is the
-provider-specific body after Pi has serialized the transcript, including
-provider message formatting and sampling parameters. Payloads differ by provider
-and API, so request-mode files remain raw JSON instead of pretending every
-provider has the same message shape.
+Captures every `before_provider_request` payload in the run. This is the body
+after Pi has serialized the transcript, including provider message formatting
+and sampling parameters.
 
-Request mode writes `request-0001.json`, `request-0002.json`, and so on because a
-single Pi agent run can issue several model requests while executing tools.
-Credential-shaped keys are redacted a second time by this extension.
+Provider payloads differ by API, so the request adapter extracts the common
+message fields (`messages`, `input`, `contents`, or `prompt`) plus system or
+instruction fields. It normalizes those messages into the same message-file shape
+used by transcript input. Remaining provider fields such as tools, token limits,
+thinking settings, and stream flags go into `request-NNNN-params.json` with
+credential redaction. A payload with no recognized message field falls back to a
+single readable request-message file.
+
+Request mode writes a `request-0001-*`, `request-0002-*`, and so on group for
+each model request because a single Pi agent run can issue several requests while
+executing tools. Each group has its own message sequence, such as
+`request-0001-0000-system.txt` and `request-0001-0001-user.txt`, followed by
+`request-0001-params.json`.
 
 Provider hooks run only when the transport exposes them. If request mode sees a
 model context but no payload hook in a session, it emits one warning instead of
@@ -102,13 +110,15 @@ silently writing a request-free dump.
       0003-toolresult.txt
       0004-assistant.txt
       0005-output.txt
-      request-0001.json             request source only
+      request-0001-0000-system.txt  request source only
+      request-0001-0001-user.txt
+      request-0001-params.json
       run-meta.json
     index.tsv
 ```
 
-- Sequence numbers continue through the input and work files, then end at
-  `<sequence>-output.txt`.
+- In input mode, sequence numbers continue through the input and work files,
+  then end at `<sequence>-output.txt`. Request groups have their own sequences.
 - Roles are lowercased and restricted to `[a-z0-9_-]`. A missing role is
   `unknown`.
 - The terminal reply is written twice by design: as the final assistant message
@@ -140,8 +150,8 @@ The index has one row per input, request, low-level run, and output event:
 | `runId` | Internal ID for the settled dump |
 | `sessionId` | Pi session ID |
 | `provider` / `model` | Request model when available |
-| `messages` | Files written for input or a low-level run |
-| `images` | Images in the input transcript |
+| `messages` | Files written for a normalized input, request, or low-level run |
+| `images` | Images found in transcript input |
 | `chars` | Characters written by that event |
 | `ok` | Low-level run ended with a non-error assistant message |
 | `ms` | Low-level run wall-clock duration when available |
@@ -176,27 +186,26 @@ therefore contain only final metadata and an empty output file.
 
 This extension writes raw conversation data in cleartext: system prompts,
 history, user messages, tool arguments, tool results, injected context, provider
-payloads, and replies. Request JSON also has a defensive second pass for
-credential-shaped keys, but message content can still contain secrets supplied
-by users, tools, or providers.
+request messages and parameters, and replies. Request parameters have a
+defensive credential-shaped key pass, but message content can still contain
+secrets supplied by users, tools, or providers.
 
 Use a private temporary directory and delete it after debugging.
 
-## Differences from the OpenClaw design
+## Pi behavior notes
 
-- Pi stores extension settings in `turn-dump.json`; this implementation uses the
-  agent-level file and an optional trusted project override.
-- Pi has no separate conversation-access permission flag for these events.
-- Pi's closest input seam is `context_with_system`, the full normalized
-  transcript immediately before provider serialization. There is no immutable
-  stock hook for an untouched pre-transform harness snapshot.
-- Pi's `before_provider_request` observes the provider-native payload but is
-  itself part of a transform chain. An extension loaded after `turn-dump` can
-  still modify the payload after this extension observes it.
-- Pi's `agent_end` is per low-level run, not per user turn. Accumulation through
-  `agent_settled` is required to keep retries and recovery in one dump.
-- Request mode stores raw provider JSON and can contain multiple requests per
-  turn, rather than OpenClaw's single `request-params.txt` shape.
+- Extension configuration is stored in `turn-dump.json` at the agent level and,
+  when trusted, under `.pi/turn-dump.json` in a project.
+- These ordinary extension events need no separate conversation-access setting.
+- `context_with_system` is the full normalized transcript immediately before
+  provider serialization. There is no immutable stock hook for an untouched
+  pre-transform transcript snapshot.
+- `before_provider_request` is itself part of a transform chain. An extension
+  loaded after `turn-dump` can still modify the payload after this extension
+  observes it.
+- `agent_end` is per low-level run, not per user turn. Accumulation through
+  `agent_settled` keeps retries and recovery in one dump.
+- A settled turn can contain several provider requests and tool rounds.
 
 ## Test
 

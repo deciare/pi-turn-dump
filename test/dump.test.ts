@@ -28,11 +28,12 @@ import {
   redactSecrets,
   renderMessage,
   sanitizeSessionKey,
+  writeInput,
   writeMessages,
   writeOutputFile,
-  writeRequestFile,
   type IndexRow,
 } from "../src/dump.ts";
+import { normalizeProviderRequest, normalizeTranscriptInput } from "../src/input.ts";
 
 /** Creates a disposable test workspace. */
 function workspace(): string {
@@ -110,19 +111,43 @@ test("message files retain role-specific content and image counts", () => {
   }
 });
 
-test("provider requests redact credential-shaped keys and outputs use the next sequence", () => {
+test("both input sources normalize into the same writer shape", () => {
   const root = workspace();
   try {
     const turn = createTurnDirectory(root, "session-2", new Date("2026-11-01T12:00:00.000Z"));
-    const request = writeRequestFile(turn.turnDir, 1, {
+    const transcript = normalizeTranscriptInput([
+      message({ role: "system", content: "system prompt", timestamp: 1 }),
+      message({ role: "user", content: "transcript question", timestamp: 2 }),
+    ]);
+    const input = writeInput(turn.turnDir, transcript);
+    assert.equal(input.messages, 2);
+    assert.equal(readFileSync(join(turn.turnDir, "0000-system.txt"), "utf8"), "system prompt");
+    assert.equal(readFileSync(join(turn.turnDir, "0001-user.txt"), "utf8"), "transcript question");
+
+    const requestInput = normalizeProviderRequest({
       apiKey: "sk-secret",
-      headers: { Authorization: "Bearer secret", "X-Trace": "trace-1" },
+      model: "test-model",
+      instructions: "request instructions",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "request question" }] },
+        { type: "function_call", name: "read", call_id: "call-1", arguments: "{\"path\":\"/tmp/a\"}" },
+        { type: "function_call_output", call_id: "call-1", output: "file text" },
+      ],
       max_tokens: 100,
     });
-    const requestText = readFileSync(join(turn.turnDir, request.filename), "utf8");
+    assert.equal(requestInput.kind, "request");
+    const request = writeInput(turn.turnDir, requestInput, 0, "request-0001-");
+    assert.equal(request.messages, 4);
+    assert.match(readFileSync(join(turn.turnDir, "request-0001-0000-system.txt"), "utf8"), /request instructions/);
+    assert.match(readFileSync(join(turn.turnDir, "request-0001-0001-user.txt"), "utf8"), /request question/);
+    assert.match(readFileSync(join(turn.turnDir, "request-0001-0002-assistant.txt"), "utf8"), /tool call: read/);
+    assert.match(readFileSync(join(turn.turnDir, "request-0001-0003-toolresult.txt"), "utf8"), /file text/);
+
+    const requestText = readFileSync(join(turn.turnDir, "request-0001-params.json"), "utf8");
     assert.match(requestText, /\[REDACTED\]/);
     assert.doesNotMatch(requestText, /sk-secret|Bearer secret/);
     assert.match(requestText, /max_tokens/);
+    assert.doesNotMatch(requestText, /request instructions|request question/);
 
     const output = writeOutputFile(turn.turnDir, "final answer", 3);
     assert.equal(output.nextSequence, 4);
