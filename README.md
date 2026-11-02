@@ -184,11 +184,21 @@ therefore contain only final metadata and an empty output file.
 
 ## Privacy
 
-This extension writes raw conversation data in cleartext: system prompts,
-history, user messages, tool arguments, tool results, injected context, provider
-request messages and parameters, and replies. Request parameters have a
-defensive credential-shaped key pass, but message content can still contain
-secrets supplied by users, tools, or providers.
+This extension writes conversation data in cleartext after best-effort credential
+redaction: system prompts, history, user messages, tool arguments, tool results,
+injected context, provider request messages and parameters, and replies. The
+same redaction is applied to every dump mode, output file, metadata file, and
+index row before disk writes.
+
+Redaction covers credential-shaped keys such as API keys, authorization values,
+tokens, passwords, cookies, and private keys. It also recognizes common value
+formats such as bearer/basic credentials, JWT and provider-prefixed tokens,
+environment-variable assignments, URL user-info credentials, and PEM private-key
+blocks.
+
+Redaction cannot identify every arbitrary secret. A secret placed in otherwise
+ordinary prose without a recognizable key name or token format can still be
+written. Treat dumps as sensitive and delete them after debugging.
 
 Use a private temporary directory and delete it after debugging.
 
