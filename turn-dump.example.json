@@ -1,0 +1,6 @@
+{
+  "dumpDir": "/tmp/pi-turn-dump",
+  "source": "input",
+  "maxBytes": 67108864,
+  "maxAgeMs": 21600000
+}

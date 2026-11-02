@@ -1,0 +1,41 @@
+{
+  "name": "pi-turn-dump",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Observe-only Pi turn dumps for debugging prompts, provider requests, tool work, and replies.",
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-coding-agent",
+    "debugging"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "turn-dump.example.json"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@types/node": "26.6.5",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
